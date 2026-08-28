@@ -281,16 +281,25 @@ def get_base_ydl_opts(use_cookies: bool = True) -> dict:
         "quiet": True,
         "no_warnings": True,
         "nocheckcertificate": True,
-        "socket_timeout": 30,
-        "retries": 5,
-        "fragment_retries": 5,
-        "concurrent_fragment_downloads": 8,
+        "socket_timeout": 60,
+        "retries": 10,
+        "fragment_retries": 10,
+        "concurrent_fragment_downloads": 4,
         "buffersize": 1024 * 1024,
         "http_chunk_size": 10 * 1024 * 1024,
-        "format_sort": ["res", "ext:mp4:m4a", "codec:h264:aac", "size"],
+        # Prefer mp4 under 720p for speed + Telegram compatibility, fallback to best
+        "format": "best[height<=720][ext=mp4]/best[ext=mp4]/best[height<=720]/best",
+        "merge_output_format": "mp4",
         "http_headers": {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
             "Accept-Language": "en-US,en;q=0.9",
+        },
+        # Helps with modern YouTube extraction
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "web"],
+                "player_skip": ["webpage", "configs"],
+            }
         },
     }
     if shutil.which("node"):
@@ -311,16 +320,23 @@ def _run_ydl(ydl_opts: dict, url: str):
 def _download_yt_sync(ydl_opts: dict, url: str):
     try:
         info = _run_ydl(ydl_opts, url)
-        # Find the downloaded file
-        if "requested_downloads" in info and info["requested_downloads"]:
+        path = None
+        # Prefer filepath from requested_downloads
+        if info and "requested_downloads" in info and info["requested_downloads"]:
             path = info["requested_downloads"][0].get("filepath")
-        else:
-            path = ydl_opts.get("outtmpl")
-            if isinstance(path, dict):
-                path = path.get("default", path)
-            # Try to resolve
-            if path and "%(" in str(path):
-                path = None
+        if not path and info:
+            path = info.get("_filename") or info.get("filename")
+        # Fallback: scan outtmpl directory
+        if (not path or not os.path.exists(str(path))) and "outtmpl" in ydl_opts:
+            outtmpl = ydl_opts["outtmpl"]
+            if isinstance(outtmpl, str):
+                folder = os.path.dirname(outtmpl) or "."
+                prefix = os.path.basename(outtmpl).split("%")[0]
+                if os.path.isdir(folder):
+                    for f in os.listdir(folder):
+                        if f.startswith(prefix) and not f.endswith((".part", ".ytdl", ".jpg", ".webp")):
+                            path = os.path.join(folder, f)
+                            break
         return info, path
     except Exception as e:
         return None, str(e)
@@ -451,7 +467,8 @@ async def handle_ytdlp(client: Client, message: Message, url: str, platform_name
             timeout=600,
         )
         if not info:
-            await safe_edit(status, f"❌ Media အချက်အလက် မရရှိပါ။\n\n— {CREDIT}")
+            err_msg = path if isinstance(path, str) else "Unknown error"
+            await safe_edit(status, f"❌ Download မအောင်မြင်ပါ:\n`{err_msg[:350]}`\n\n— {CREDIT}")
             return
 
         final_path = path or ""
