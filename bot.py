@@ -57,7 +57,7 @@ ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.str
 OUTPUT_FOLDER = "downloads"
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
-CREDIT = "@YourBot"
+CREDIT = "@KMM_MOD1"
 COOKIES_FILE = "cookies.txt"
 
 SESSION = requests.Session()
@@ -538,22 +538,114 @@ async def handle_tiktok(client: Client, message: Message, url: str) -> None:
 
 
 # ──────────────────────────────────────────────
-# Router
+# Router + State handlers (Caption edit + Channel set + Link routing)
 # ──────────────────────────────────────────────
+WAITING_CAPTION = set()   # user_ids waiting for new caption
+WAITING_CHANNEL = set()   # user_ids waiting for channel
+
+@app.on_callback_query(filters.regex("^edit_caption$"))
+async def edit_caption_cb(client: Client, query: CallbackQuery):
+    user_id = query.from_user.id
+    if user_id not in PENDING:
+        await query.answer("Video မရှိတော့ပါ။ Link အသစ်ပို့ပါ။", show_alert=True)
+        return
+
+    await query.answer()
+    WAITING_CAPTION.add(user_id)
+    await query.message.reply_text(
+        "✏️ **ပြင်ချင်တဲ့ Caption (စာသား) အသစ်ကို ရိုက်ထည့်ပါ။**\n\n"
+        "ပယ်ဖျက်ချင်ရင် `/cancel` ရိုက်ပါ။"
+    )
+
+
 @app.on_message(filters.private & filters.text & ~filters.command(["start", "help", "setchannel", "users", "mychannel"]))
-async def router(client: Client, message: Message):
-    # Ignore if this is a reply to ForceReply (handled elsewhere)
-    if message.reply_to_message and message.reply_to_message.from_user and message.reply_to_message.from_user.is_self:
-        text = message.reply_to_message.text or ""
-        if "Channel ရဲ့ username" in text or "ပြင်ချင်တဲ့ Caption" in text:
+async def handle_text_states(client: Client, message: Message):
+    """Handle caption edit + channel set + normal link routing"""
+    user_id = message.from_user.id
+    track_user(message.from_user)
+    text = (message.text or "").strip()
+
+    # ─── Waiting for new caption ───
+    if user_id in WAITING_CAPTION:
+        WAITING_CAPTION.discard(user_id)
+
+        if text.lower() == "/cancel":
+            await message.reply_text("ပယ်ဖျက်လိုက်ပါပြီ။")
             return
 
-    platform, url = detect_platform(message.text or "")
+        if user_id not in PENDING:
+            await message.reply_text("Video မရှိတော့ပါ။ Link အသစ်ပို့ပါ။")
+            return
+
+        new_caption = text
+        PENDING[user_id]["caption"] = new_caption
+
+        try:
+            await client.edit_message_caption(
+                chat_id=message.chat.id,
+                message_id=PENDING[user_id]["message_id"],
+                caption=new_caption,
+                reply_markup=make_buttons()
+            )
+            await message.reply_text("✅ **Caption ပြင်ပြီးပါပြီ။**")
+        except Exception as e:
+            await message.reply_text(f"❌ ပြင်လို့ မရပါ:\n`{str(e)[:200]}`")
+        return
+
+    # ─── Waiting for channel ───
+    if user_id in WAITING_CHANNEL:
+        WAITING_CHANNEL.discard(user_id)
+
+        if text.lower() == "/cancel":
+            await message.reply_text("ပယ်ဖျက်လိုက်ပါပြီ။")
+            return
+
+        # Accept both @username and numeric ID (-100...)
+        raw = text.strip()
+        if raw.startswith("@"):
+            channel = raw[1:].strip()
+        elif raw.lstrip("-").isdigit():
+            channel = raw  # numeric ID like -1001234567890
+        else:
+            channel = raw.lstrip("@").strip()
+
+        if not channel:
+            await message.reply_text("မှန်ကန်တဲ့ Channel username သို့မဟုတ် ID ထည့်ပေးပါ။")
+            return
+
+        channels_db[str(user_id)] = channel
+        save_json(CHANNELS_FILE, channels_db)
+
+        if str(channel).startswith("-100"):
+            display = f"`{channel}` (Private Channel ID)"
+            hint = (
+                "1. Channel ထဲ ဝင်ပါ\n"
+                "2. ဒီ Bot ကို **Admin** အဖြစ် ထည့်ပါ\n"
+                "3. **Post Messages** ခွင့်ပြုပေးပါ"
+            )
+        else:
+            display = f"**@{channel}**"
+            hint = (
+                f"1. @{channel} Channel ထဲ ဝင်ပါ\n"
+                "2. ဒီ Bot ကို **Admin** အဖြစ် ထည့်ပါ\n"
+                "3. **Post Messages** ခွင့်ပြုပေးပါ"
+            )
+
+        await message.reply_text(
+            f"✅ Channel သတ်မှတ်ပြီးပါပြီ → {display}\n\n"
+            f"⚠️ **အရေးကြီး**\n{hint}\n\n"
+            "ပြီးရင် Video Link ပို့ → **Post** ခလုတ် နှိပ်နိုင်ပါပြီ။"
+        )
+        return
+
+    # ─── Normal link routing ───
+    platform, url = detect_platform(text)
     if not platform or not url:
         await message.reply_text(
             "Link မတွေ့ပါ။\n\n"
             "Supported: YouTube, Facebook, Instagram, TikTok, Pinterest, Twitter/X, Reddit, Threads, Vimeo ...\n\n"
-            "Link တစ်ခု ပို့ပေးပါ။"
+            "Link တစ်ခု ပို့ပေးပါ။\n\n"
+            "Channel သတ်မှတ်ချင်ရင် → /setchannel"
         )
         return
 
@@ -583,81 +675,15 @@ async def router(client: Client, message: Message):
 
 
 # ──────────────────────────────────────────────
-# Edit Caption
-# ──────────────────────────────────────────────
-@app.on_callback_query(filters.regex("^edit_caption$"))
-async def edit_caption_cb(client: Client, query: CallbackQuery):
-    user_id = query.from_user.id
-    if user_id not in PENDING:
-        await query.answer("Video မရှိတော့ပါ။ Link အသစ်ပို့ပါ။", show_alert=True)
-        return
-
-    await query.answer()
-    await query.message.reply_text(
-        "ပြင်ချင်တဲ့ Caption (စာသား) အသစ်ကို ရိုက်ထည့်ပါ။\n\n"
-        "ပယ်ဖျက်ချင်ရင် /cancel ရိုက်ပါ။",
-        reply_markup=ForceReply(selective=True)
-    )
-
-
-@app.on_message(filters.private & filters.reply & filters.text)
-async def handle_force_replies(client: Client, message: Message):
-    if not message.reply_to_message:
-        return
-
-    replied_text = message.reply_to_message.text or ""
-    user_id = message.from_user.id
-    track_user(message.from_user)
-
-    # New caption
-    if "ပြင်ချင်တဲ့ Caption" in replied_text:
-        if user_id not in PENDING:
-            await message.reply_text("Video မရှိတော့ပါ။ Link အသစ်ပို့ပါ။")
-            return
-
-        if message.text.strip().lower() == "/cancel":
-            await message.reply_text("ပယ်ဖျက်လိုက်ပါပြီ။")
-            return
-
-        new_caption = message.text.strip()
-        PENDING[user_id]["caption"] = new_caption
-
-        try:
-            await client.edit_message_caption(
-                chat_id=message.chat.id,
-                message_id=PENDING[user_id]["message_id"],
-                caption=new_caption,
-                reply_markup=make_buttons()
-            )
-            await message.reply_text("✅ Caption ပြင်ပြီးပါပြီ။")
-        except Exception as e:
-            await message.reply_text(f"ပြင်လို့ မရပါ: `{str(e)[:200]}`")
-        return
-
-    # Set channel
-    if "Channel ရဲ့ username" in replied_text:
-        username = message.text.strip().lstrip("@").strip()
-        if not username:
-            await message.reply_text("မှန်ကန်တဲ့ username ထည့်ပေးပါ။")
-            return
-
-        channels_db[str(user_id)] = username
-        save_json(CHANNELS_FILE, channels_db)
-
-        await message.reply_text(
-            f"✅ Channel သတ်မှတ်ပြီးပါပြီ → **@{username}**\n\n"
-            "⚠️ **အရေးကြီး**\n"
-            f"1. @{username} Channel ထဲ ဝင်ပါ\n"
-            f"2. ဒီ Bot ကို **Admin** အဖြစ် ထည့်ပါ\n"
-            f"3. **Post Messages** ခွင့်ပြုပေးပါ\n\n"
-            "ပြီးရင် Video Link ပို့ → **Post** ခလုတ် နှိပ်နိုင်ပါပြီ။"
-        )
-        return
-
-
-# ──────────────────────────────────────────────
 # Post to Channel
 # ──────────────────────────────────────────────
+def get_chat_id(channel: str):
+    """Return proper chat_id for send methods"""
+    if str(channel).startswith("-100") or str(channel).lstrip("-").isdigit():
+        return int(channel)
+    return f"@{channel}"
+
+
 @app.on_callback_query(filters.regex("^post_video$"))
 async def post_video_cb(client: Client, query: CallbackQuery):
     user_id = query.from_user.id
@@ -670,54 +696,72 @@ async def post_video_cb(client: Client, query: CallbackQuery):
         await query.answer()
         await query.message.reply_text(
             "သင့် Channel ကို အရင် သတ်မှတ်ပါ။\n\n"
-            "/setchannel ရိုက်ပြီး Channel username ထည့်ပေးပါ။"
+            "/setchannel ရိုက်ပြီး Channel username သို့မဟုတ် ID ထည့်ပေးပါ။"
         )
         return
 
     await query.answer("Channel ပေါ် တင်နေပါတယ်...")
 
     data = PENDING[user_id]
+    chat_id = get_chat_id(channel)
+
     try:
         if data.get("is_audio"):
             await client.send_audio(
-                chat_id=f"@{channel}",
+                chat_id=chat_id,
                 audio=data["file_id"],
                 caption=data["caption"],
             )
         elif data.get("is_video"):
             await client.send_video(
-                chat_id=f"@{channel}",
+                chat_id=chat_id,
                 video=data["file_id"],
                 caption=data["caption"],
                 supports_streaming=True,
             )
         else:
             await client.send_photo(
-                chat_id=f"@{channel}",
+                chat_id=chat_id,
                 photo=data["file_id"],
                 caption=data["caption"],
             )
 
+        display = f"`{channel}`" if str(channel).startswith("-") else f"@{channel}"
         await query.message.reply_text(
-            f"✅ **Channel ပေါ် တင်ပြီးပါပြီ!**\n→ @{channel}\n\n"
+            f"✅ **Channel ပေါ် တင်ပြီးပါပြီ!**\n→ {display}\n\n"
             f"🎬 {data.get('title', '')[:80]}"
         )
     except ChatAdminRequired:
         await query.message.reply_text(
-            f"❌ Bot ကို Channel မှာ **Admin** မပေးရသေးပါ။\n\n"
-            f"**လုပ်ရမယ့်အဆင့်များ:**\n"
-            f"1. @{channel} ထဲ ဝင်ပါ\n"
-            f"2. Bot ကို Admin အဖြစ် ထည့်ပါ\n"
-            f"3. **Post Messages** ခွင့်ပြုပါ\n\n"
-            f"ပြီးရင် ဒီ **Post** ခလုတ်ကို ပြန်နှိပ်ပါ။"
+            "❌ Bot ကို Channel မှာ **Admin** မပေးရသေးပါ။\n\n"
+            "**လုပ်ရမယ့်အဆင့်များ:**\n"
+            "1. Channel ထဲ ဝင်ပါ\n"
+            "2. Bot ကို Admin အဖြစ် ထည့်ပါ\n"
+            "3. **Post Messages** ခွင့်ပြုပါ\n\n"
+            "ပြီးရင် ဒီ **Post** ခလုတ်ကို ပြန်နှိပ်ပါ။"
         )
-    except (ChannelInvalid, ChannelPrivate):
+    except (ChannelInvalid, ChannelPrivate) as e:
         await query.message.reply_text(
-            f"❌ Channel `@{channel}` ကို ရှာမတွေ့ပါ သို့မဟုတ် Private ဖြစ်နေပါတယ်။\n"
-            f"/setchannel နဲ့ ပြန်သတ်မှတ်ပါ။"
+            "❌ Channel ကို ရှာမတွေ့ပါ သို့မဟုတ် Private ဖြစ်နေပါတယ်။\n\n"
+            "• Public Channel ဆိုရင် `@username` ထည့်ပါ\n"
+            "• Private Channel ဆိုရင် Channel ID (`-100...`) ထည့်ပါ\n\n"
+            "/setchannel နဲ့ ပြန်သတ်မှတ်ပါ။"
         )
     except Exception as e:
-        await query.message.reply_text(f"❌ အမှား: `{str(e)[:250]}`")
+        err = str(e)
+        if "USERNAME_INVALID" in err:
+            await query.message.reply_text(
+                "❌ **Username မမှန်ပါ**\n\n"
+                "• Public Channel ဆိုရင် မှန်ကန်တဲ့ `@username` ထည့်ပါ\n"
+                "• Private Channel ဆိုရင် **Channel ID** (`-100xxxxxxxxxx`) ထည့်ပါ\n\n"
+                "**Channel ID ရယူနည်း:**\n"
+                "1. @userinfobot သို့မဟုတ် @getidsbot ကို Channel ထဲ Add လုပ်ပါ\n"
+                "2. Channel ID (`-100...`) ကို ကူးယူပါ\n"
+                "3. /setchannel နဲ့ ထည့်ပါ\n\n"
+                "သို့မဟုတ် Channel ထဲက message တစ်ခုကို Saved Messages ဆီ Forward လုပ်ပြီး ID ကြည့်နိုင်ပါတယ်။"
+            )
+        else:
+            await query.message.reply_text(f"❌ အမှား: `{err[:250]}`")
 
 
 # ──────────────────────────────────────────────
@@ -729,7 +773,7 @@ async def cmd_start(client: Client, message: Message):
     text = (
         "👋 **All-in-One Video + Channel Post Bot** မှ ကြိုဆိုပါတယ်!\n\n"
         "📥 **အသုံးပြုနည်း**\n"
-        "1. `/setchannel` → သင့် Channel username သတ်မှတ်\n"
+        "1. `/setchannel` → သင့် Channel username သို့မဟုတ် ID သတ်မှတ်\n"
         "2. Bot ကို Channel မှာ **Admin** ပေး (Post Messages)\n"
         "3. YouTube / FB / IG / TikTok / Pinterest ... Link ပို့\n"
         "4. Video ပေါ်လာရင် **✏️ Edit** နဲ့ **📤 Post** သုံး\n\n"
@@ -748,7 +792,7 @@ async def cmd_start(client: Client, message: Message):
 async def cmd_help(client: Client, message: Message):
     await message.reply_text(
         "📖 **အသုံးပြုနည်း**\n\n"
-        "`/setchannel` — Channel username သတ်မှတ်\n"
+        "`/setchannel` — Channel username သို့မဟုတ် ID သတ်မှတ်\n"
         "`/mychannel` — လက်ရှိ Channel ကြည့်\n"
         "`/users` — (Admin only) သုံးသူစာရင်း\n\n"
         "Link ပို့ → Video ပေါ်လာရင်\n"
@@ -761,10 +805,13 @@ async def cmd_help(client: Client, message: Message):
 @app.on_message(filters.command("setchannel") & filters.private)
 async def cmd_setchannel(client: Client, message: Message):
     track_user(message.from_user)
+    WAITING_CHANNEL.add(message.from_user.id)
     await message.reply_text(
-        "သင့် Channel ရဲ့ username ကို ပို့ပေးပါ။\n"
-        "ဥပမာ → `@mychannel` သို့မဟုတ် `mychannel`",
-        reply_markup=ForceReply(selective=True)
+        "📢 **Channel သတ်မှတ်ရန်**\n\n"
+        "• Public Channel ဆိုရင် → `@mychannel` သို့မဟုတ် `mychannel`\n"
+        "• Private Channel ဆိုရင် → Channel ID (`-100xxxxxxxxxx`)\n\n"
+        "Channel ID ရယူနည်း: @userinfobot ကို Channel ထဲ Add လုပ်ပါ။\n\n"
+        "ပယ်ဖျက်ချင်ရင် `/cancel` ရိုက်ပါ။"
     )
 
 
@@ -773,7 +820,8 @@ async def cmd_mychannel(client: Client, message: Message):
     track_user(message.from_user)
     ch = channels_db.get(str(message.from_user.id))
     if ch:
-        await message.reply_text(f"လက်ရှိ Channel → **@{ch}**\n\nပြောင်းချင်ရင် /setchannel ရိုက်ပါ။")
+        display = f"`{ch}`" if str(ch).startswith("-") else f"@{ch}"
+        await message.reply_text(f"လက်ရှိ Channel → {display}\n\nပြောင်းချင်ရင် /setchannel ရိုက်ပါ။")
     else:
         await message.reply_text("Channel မသတ်မှတ်ရသေးပါ။\n/setchannel ရိုက်ပါ။")
 
@@ -797,6 +845,14 @@ async def cmd_users(client: Client, message: Message):
         text += f"\n... နောက်ထပ် {len(users_db)-40} ယောက် ရှိသေးသည်"
 
     await message.reply_text(text)
+
+
+@app.on_message(filters.command("cancel") & filters.private)
+async def cmd_cancel(client: Client, message: Message):
+    uid = message.from_user.id
+    WAITING_CAPTION.discard(uid)
+    WAITING_CHANNEL.discard(uid)
+    await message.reply_text("ပယ်ဖျက်လိုက်ပါပြီ။")
 
 
 # ──────────────────────────────────────────────
