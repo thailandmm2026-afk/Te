@@ -1,0 +1,7 @@
+pyrogram==2.0.106
+tgcrypto==1.2.5
+requests>=2.32.0
+yt-dlp>=2025.1.0
+pinterest-downloader>=4.1.0
+python-dotenv>=1.0.0
+beautifulsoup4>=4.12.0

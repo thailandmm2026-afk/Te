@@ -1,0 +1,16 @@
+name: fb-downloader-bot
+services:
+  - name: bot
+    type: worker
+    instance_type: nano
+    regions:
+      - was
+    docker:
+      dockerfile: Dockerfile
+    env:
+      - key: API_ID
+        scope: secret
+      - key: API_HASH
+        scope: secret
+      - key: BOT_TOKEN
+        scope: secret
